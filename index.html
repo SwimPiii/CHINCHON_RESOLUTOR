@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chinchón Resolutor</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Chinchón Resolutor</h1>
+      <div class="config">
+        <label>
+          Nº jugadores:
+          <select id="playersSelect">
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4" selected>4</option>
+          </select>
+        </label>
+        <label title="Si está activo, el 1 de Oros actúa como comodín">
+          <input id="comodinCheckbox" type="checkbox" /> 1 de Oros comodín
+        </label>
+      </div>
+    </header>
+
+    <main class="table-layout">
+      <section class="panel controls">
+        <div class="controls-row">
+          <label>Empieza jugador:
+            <select id="startSeatSelect">
+              <option value="1" selected>1 (Sur - Yo)</option>
+              <option value="2">2 (Este)</option>
+              <option value="3">3 (Norte)</option>
+              <option value="4">4 (Oeste)</option>
+            </select>
+          </label>
+          <button id="startRoundBtn" class="btn btn-primary">Iniciar ronda</button>
+          <button id="resetRoundBtn" class="btn btn-secondary">Reiniciar</button>
+        </div>
+        <div class="status-row">
+          <span id="turnStatus">Turno: -</span>
+          <span id="helperStatus" class="hint"></span>
+        </div>
+      </section>
+
+      <section class="board">
+        <div class="seat seat-N" id="seat-N">
+          <div class="seat-label">3 · Norte</div>
+          <div class="enemy-hand" data-seat="N"></div>
+          <div class="seat-controls" id="seat-controls-N"></div>
+        </div>
+        <div class="seat seat-E" id="seat-E">
+          <div class="seat-label">2 · Este</div>
+          <div class="enemy-hand" data-seat="E"></div>
+          <div class="seat-controls" id="seat-controls-E"></div>
+        </div>
+        <div class="center">
+          <div class="deck">
+            <div class="stack">
+              <div class="stack-label">Mazo (<span id="drawCount">-</span>)</div>
+              <div id="drawPile" class="cards center-cards" title="Clic para elegir carta robada (solo cartas posibles)"></div>
+            </div>
+            <div class="stack">
+              <div class="stack-label">Descarte</div>
+              <div id="discardPile" class="cards center-cards" title="Clic para tomar la carta visible"></div>
+            </div>
+          </div>
+          <div class="analysis panel">
+            <div class="controls-row">
+              <button id="recommendBtn" class="btn">Analizar jugada</button>
+            </div>
+            <div id="recommendation" class="recommendation"></div>
+            <details>
+              <summary>Ver explicación</summary>
+              <div id="explainBox" class="explain"></div>
+            </details>
+          </div>
+        </div>
+        <div class="seat seat-W" id="seat-W">
+          <div class="seat-label">4 · Oeste</div>
+          <div class="enemy-hand" data-seat="O"></div>
+          <div class="seat-controls" id="seat-controls-O"></div>
+        </div>
+        <div class="seat seat-S" id="seat-S">
+          <div class="seat-label">1 · Sur (Yo)</div>
+          <div id="myHand" class="cards" title="Pulsa en los huecos para seleccionar tus cartas"></div>
+          <div class="seat-toolbar"><button id="resetHandBtnBottom" class="btn btn-secondary">Vaciar mi mano</button></div>
+          <div class="temp-area">
+            <div class="seat-label">Carta robada (temporal)</div>
+            <div id="myTempSlot" class="cards"></div>
+          </div>
+        </div>
+        
+      </section>
+    </main>
+
+    <!-- Selector modal reutilizable -->
+    <dialog id="cardPicker">
+      <form method="dialog" class="picker">
+        <h3>Elige una carta</h3>
+        <div class="picker-grid" id="pickerGrid"></div>
+        <menu class="picker-actions">
+          <button value="cancel" class="btn btn-secondary">Cancelar</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <footer class="app-footer">
+      <span>Turnos en sentido antihorario: Sur → Este → Norte → Oeste</span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+  </html>
