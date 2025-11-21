@@ -18,7 +18,10 @@ const state = {
   // Estado de flujo
   awaitingRivalDiscard: null, // 'E' | 'N' | 'O' cuando esperamos su descarte
   awaitingMyHiddenDraw: false,
-  tempDrawnCard: null,
+  // Sistema de reciclaje del mazo
+  discardSequence: [], // Orden exacto de descartes [{card, by}] para reciclar
+  recycledDeck: [], // Mazo reciclado con secuencia conocida [{card}]
+  recycledIndex: 0, // Índice actual en recycledDeck
 };
 
 // Utilidades de cartas
@@ -59,6 +62,15 @@ function cardName(card) {
 function cardNameWithArticle(card) {
   if (!card) return '';
   return `el ${cardName(card)}`;
+}
+
+// Valor en puntos de una carta según reglas del Chinchón
+function cardValue(card) {
+  if (!card) return 0;
+  // Figuras (Sota=10, Caballo=11, Rey=12) valen 10 puntos
+  if (card.rank >= 10) return 10;
+  // Resto: valor nominal
+  return card.rank;
 }
 
 // SVG de palos (colorean con currentColor vía CSS de .suit)
@@ -279,7 +291,21 @@ function renderEnemyHand(key) {
 }
 
 function possibleRivalDiscard(key) {
-  // Unión: cartas no vistas + cartas conocidas del rival (puede descartar algo que cogió de mesa)
+  // Si robó del mazo reciclado, sabemos exactamente qué carta tiene
+  const lastPick = state.rivals[key].picks[state.rivals[key].picks.length - 1];
+  if (lastPick && lastPick.type === 'oculta' && lastPick.card) {
+    // Puede descartar: la carta que robó + sus cartas conocidas + cartas no vistas
+    const choices = new Map();
+    choices.set(cardCode(lastPick.card), lastPick.card);
+    const known = state.rivals[key].knownHand || [];
+    known.forEach(c => choices.set(cardCode(c), c));
+    const unseen = unseenCards();
+    unseen.forEach(c => choices.set(cardCode(c), c));
+    if (state.tableCard) choices.delete(cardCode(state.tableCard));
+    return [...choices.values()];
+  }
+  
+  // Lógica original: cartas no vistas + cartas conocidas del rival
   const unseen = unseenCards();
   const known = state.rivals[key].knownHand || [];
   const map = new Map();
@@ -428,7 +454,13 @@ function simulateBestDiscard(afterDrawCards, options) {
     // Penalizar si la carta puede habilitar a un rival por señales simples
     penalty += rivalHeatPenalty(discard);
     const total = ev.score - penalty;
-    if (!best.eval || total > best.eval.score) best = { discard, eval: { ...ev, score: total } };
+    
+    // Desempate: si el score es igual, preferir descartar carta de mayor VALOR (figuras=10, resto=nominal)
+    const discardValue = cardValue(discard);
+    const bestValue = best.discard ? cardValue(best.discard) : 0;
+    if (!best.eval || total > best.eval.score || (total === best.eval.score && discardValue > bestValue)) {
+      best = { discard, eval: { ...ev, score: total } };
+    }
   }
   return best;
 }
@@ -531,16 +563,40 @@ function recommendPlay() {
         btnOculta.className = 'btn btn-primary';
         btnOculta.textContent = 'Robar oculta';
         btnOculta.onclick = () => {
-          const choices = unseenCards();
-          openPicker(c => {
-            state.myHand.push(c);
+          // Verificar si necesitamos reciclar el mazo
+          if (state.drawPileCount === 0 && state.recycledDeck.length === 0) {
+            recycleDeck();
+          }
+          
+          // Si hay mazo reciclado, sabemos exactamente qué carta vamos a robar
+          const drawnCard = getNextRecycledCard();
+          
+          if (drawnCard) {
+            // Mazo reciclado: sabemos la carta exacta
+            state.myHand.push(drawnCard);
             compactHand();
             const best = simulateBestDiscard(getMyHand(), { comodinOros: state.comodinOros });
             discardFromMyHand(best.discard);
-            if (state.roundStarted && typeof state.drawPileCount === 'number') state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+            if (state.roundStarted && typeof state.drawPileCount === 'number') {
+              state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+            }
             advanceTurn();
             refreshUI();
-          }, choices);
+          } else {
+            // Mazo normal: elegir de cartas no vistas
+            const choices = unseenCards();
+            openPicker(c => {
+              state.myHand.push(c);
+              compactHand();
+              const best = simulateBestDiscard(getMyHand(), { comodinOros: state.comodinOros });
+              discardFromMyHand(best.discard);
+              if (state.roundStarted && typeof state.drawPileCount === 'number') {
+                state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+              }
+              advanceTurn();
+              refreshUI();
+            }, choices);
+          }
         };
         box.appendChild(btnOculta);
       }
@@ -565,8 +621,10 @@ function finalizeRoundWithClose(ev) {
   state.turnSeat=null;
   state.awaitingRivalDiscard=null;
   state.awaitingMyHiddenDraw=false;
-  state.tempDrawnCard=null;
   state.drawPileCount=null;
+  state.discardSequence = [];
+  state.recycledDeck = [];
+  state.recycledIndex = 0;
   setRecommendation(`Ronda cerrada. Sobra ${cardNameWithArticle(ev.leftovers[0])}.`, 'Cierre con grupos detectados.');
   refreshUI();
 }
@@ -601,22 +659,40 @@ function init() {
     const seat = state.turnSeat;
     if (!seat) return;
     if (seat === 1) {
-      // Mi turno: robar oculta real (lista de posibles = no vistas)
-      const choices = unseenCards();
-      openPicker(c => {
-        state.myHand.push(c); compactHand();
-        // descartar automáticamente mejor carta
+      // Verificar si necesitamos reciclar el mazo
+      if (state.drawPileCount === 0 && state.recycledDeck.length === 0) {
+        recycleDeck();
+      }
+      
+      // Si hay mazo reciclado, sabemos exactamente qué carta vamos a robar
+      const drawnCard = getNextRecycledCard();
+      
+      if (drawnCard) {
+        // Mazo reciclado: sabemos la carta exacta
+        state.myHand.push(drawnCard); compactHand();
         const best = simulateBestDiscard(getMyHand(), { comodinOros: state.comodinOros });
         discardFromMyHand(best.discard);
-        if (state.roundStarted && typeof state.drawPileCount === 'number') state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+        if (state.roundStarted && typeof state.drawPileCount === 'number') {
+          state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+        }
         advanceTurn(); refreshUI();
-      }, choices);
+      } else {
+        // Mazo normal: elegir de cartas no vistas
+        const choices = unseenCards();
+        openPicker(c => {
+          state.myHand.push(c); compactHand();
+          const best = simulateBestDiscard(getMyHand(), { comodinOros: state.comodinOros });
+          discardFromMyHand(best.discard);
+          if (state.roundStarted && typeof state.drawPileCount === 'number') {
+            state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+          }
+          advanceTurn(); refreshUI();
+        }, choices);
+      }
     } else {
       // Turno rival: marcar que ha robado oculta y pedir su descarte
       const key = seatToKey(seat);
       onRivalDrawHidden(key);
-      // opcionalmente, permitir registrar la carta exacta robada (si la ves):
-      // openPicker(c => { state.rivals[key].picks.push({type:'oculta', card: c, t: Date.now()}); }, unseenCards());
     }
   });
 
@@ -661,8 +737,10 @@ function init() {
       state.turnSeat = null;
       state.awaitingRivalDiscard = null;
       state.awaitingMyHiddenDraw = false;
-      state.tempDrawnCard = null;
       state.drawPileCount = null;
+      state.discardSequence = [];
+      state.recycledDeck = [];
+      state.recycledIndex = 0;
     }
     refreshUI();
   });
@@ -676,9 +754,11 @@ function init() {
     state.seen = new Set();
     state.awaitingRivalDiscard = null;
     state.awaitingMyHiddenDraw = false;
-    state.tempDrawnCard = null;
     state.roundStarted = false;
     state.drawPileCount = null;
+    state.discardSequence = [];
+    state.recycledDeck = [];
+    state.recycledIndex = 0;
     refreshUI();
   });
 
@@ -739,6 +819,9 @@ function renderRivalSeatControls() {
   const btnMesa = document.createElement('button'); btnMesa.className='btn'; btnMesa.textContent='Rival toma de mesa'; btnMesa.disabled = !state.tableCard;
   btnMesa.onclick = () => { onRivalTakeFromTable(key); };
   const btnOculta = document.createElement('button'); btnOculta.className='btn'; btnOculta.textContent='Rival roba oculta';
+  // Deshabilitar si no hay cartas para robar (ni mazo ni reciclado pendiente)
+  const canDraw = state.drawPileCount > 0 || state.recycledDeck.length > 0 || state.discardSequence.length > 0;
+  btnOculta.disabled = !canDraw;
   btnOculta.onclick = () => { onRivalDrawHidden(key); };
   row.append(btnMesa, btnOculta);
   host.appendChild(row);
@@ -796,6 +879,32 @@ function reorderMyHandForDisplay() {
 
 function seatToKey(seat) { return {2:'E',3:'N',4:'O'}[seat] || 'S'; }
 
+// Función de reciclaje del mazo cuando se agota
+function recycleDeck() {
+  if (state.discardSequence.length === 0) return; // No hay nada para reciclar
+  
+  // La última carta descartada se queda boca arriba como nueva carta de mesa
+  const lastDiscard = state.discardSequence[state.discardSequence.length - 1];
+  state.tableCard = lastDiscard.card;
+  
+  // El resto de cartas se reciclan en el mismo orden (primera descartada = primera en salir)
+  state.recycledDeck = [];
+  for (let i = 0; i < state.discardSequence.length - 1; i++) {
+    state.recycledDeck.push(state.discardSequence[i].card);
+  }
+  
+  state.recycledIndex = 0;
+  state.drawPileCount = state.recycledDeck.length;
+}
+
+// Obtiene la próxima carta del mazo reciclado
+function getNextRecycledCard() {
+  if (state.recycledIndex < state.recycledDeck.length) {
+    return state.recycledDeck[state.recycledIndex++];
+  }
+  return null;
+}
+
 // Aplica automáticamente la toma de mesa y el descarte sugerido
 function applyPlayerTakeFromTableAuto(discardCard) {
   if (!state.tableCard) return;
@@ -806,13 +915,43 @@ function applyPlayerTakeFromTableAuto(discardCard) {
   advanceTurn();
 }
 
-// Inicia flujo de robo oculto: espera que marques la carta en el cajón temporal
+// Inicia flujo de robo oculto directo
 function beginPlayerHiddenFlow() {
-  state.awaitingMyHiddenDraw = true;
-  renderTempSlot();
+  // Verificar si necesitamos reciclar el mazo
+  if (state.drawPileCount === 0 && state.recycledDeck.length === 0) {
+    recycleDeck();
+  }
+  
+  // Si hay mazo reciclado, sabemos exactamente qué carta vamos a robar
+  const drawnCard = getNextRecycledCard();
+  
+  if (drawnCard) {
+    // Mazo reciclado: sabemos la carta exacta
+    state.myHand.push(drawnCard);
+    compactHand();
+    openPicker(card => {
+      discardFromMyHand(card);
+      if (state.roundStarted && typeof state.drawPileCount === 'number') {
+        state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+      }
+      advanceTurn();
+    });
+  } else {
+    // Mazo normal: elegir de cartas no vistas
+    const choices = unseenCards();
+    openPicker(c => {
+      state.myHand.push(c);
+      compactHand();
+      openPicker(card => {
+        discardFromMyHand(card);
+        if (state.roundStarted && typeof state.drawPileCount === 'number') {
+          state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+        }
+        advanceTurn();
+      });
+    }, choices);
+  }
 }
-
-// Las funciones antiguas de mi turno se sustituyen por applyPlayerTakeFromTableAuto y beginPlayerHiddenFlow
 
 function discardFromMyHand(card) {
   // remove one instance
@@ -821,6 +960,8 @@ function discardFromMyHand(card) {
   compactHand();
   state.tableCard = card; // va a mesa
   state.seen.add(cardCode(card));
+  // Registrar en secuencia de descartes para reciclaje
+  state.discardSequence.push({ card, by: 'S' });
 }
 
 function isCardUsed(card, skipIndex = -1) {
@@ -862,13 +1003,40 @@ function onRivalTakeFromTable(key) {
 }
 
 function onRivalDrawHidden(key) {
-  state.rivals[key].picks.push({ type: 'oculta', card: null, t: Date.now() });
+  // Verificar si necesitamos reciclar el mazo
+  if (state.drawPileCount === 0 && state.recycledDeck.length === 0) {
+    recycleDeck();
+  }
+  
+  // Si hay mazo reciclado, sabemos exactamente qué carta robó
+  const drawnCard = getNextRecycledCard();
+  
+  state.rivals[key].picks.push({ type: 'oculta', card: drawnCard, t: Date.now() });
   state.awaitingRivalDiscard = key;
-  if (state.roundStarted && typeof state.drawPileCount === 'number') state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+  
+  if (state.roundStarted && typeof state.drawPileCount === 'number') {
+    state.drawPileCount = Math.max(0, state.drawPileCount - 1);
+  }
+  
   refreshUI();
 }
 
 function rivalDiscard(key, card) {
+  // Verificar si sabemos qué carta robó en su último pick
+  const lastPick = state.rivals[key].picks[state.rivals[key].picks.length - 1];
+  if (lastPick && lastPick.type === 'oculta' && lastPick.card) {
+    // Si robó del mazo reciclado y descarta otra carta diferente, sabemos que se quedó la robada
+    const drawnCode = cardCode(lastPick.card);
+    const discardCode = cardCode(card);
+    if (drawnCode !== discardCode) {
+      // Añadir la carta robada a su mano conocida si no está ya
+      const alreadyKnown = state.rivals[key].knownHand.some(c => cardCode(c) === drawnCode);
+      if (!alreadyKnown) {
+        state.rivals[key].knownHand.push(lastPick.card);
+      }
+    }
+  }
+  
   state.rivals[key].discards.push({ card, t: Date.now() });
   state.seen.add(cardCode(card));
   // Si estaba en conocidas, remover
@@ -876,6 +1044,8 @@ function rivalDiscard(key, card) {
   if (idx>=0) state.rivals[key].knownHand.splice(idx,1);
   // La carta descartada pasa a mesa
   state.tableCard = card;
+  // Registrar en secuencia de descartes para reciclaje
+  state.discardSequence.push({ card, by: key });
   refreshUI();
 }
 
@@ -886,22 +1056,4 @@ function advanceTurn() {
   if (state.roundStarted && state.turnSeat === 1 && getMyHand().length === 7) {
     recommendPlay();
   }
-}
-
-function renderTempSlot() {
-  const box = document.getElementById('myTempSlot');
-  box.innerHTML = '';
-  if (!state.awaitingMyHiddenDraw) return;
-  const ph = document.createElement('div'); ph.className='card placeholder'; ph.title='Seleccionar carta robada';
-  ph.onclick = () => openPicker(c => {
-    state.tempDrawnCard = c;
-    // agregar a mano y decidir descarte automáticamente
-    state.myHand.push(c); compactHand();
-    const best = simulateBestDiscard(getMyHand(), { comodinOros: state.comodinOros });
-    discardFromMyHand(best.discard);
-    state.awaitingMyHiddenDraw = false; state.tempDrawnCard = null;
-    if (state.roundStarted && typeof state.drawPileCount === 'number') state.drawPileCount = Math.max(0, state.drawPileCount - 1);
-    advanceTurn();
-  });
-  box.appendChild(ph);
 }
